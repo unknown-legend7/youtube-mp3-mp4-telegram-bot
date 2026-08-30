@@ -7,6 +7,8 @@ import shutil
 import sqlite3
 import asyncio
 import logging
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -44,6 +46,29 @@ MAX_TELEGRAM_FILE_SIZE = (2000 if LOCAL_API_URL else 50) * 1024 * 1024
 
 DOWNLOAD_TIMEOUT_SECONDS = 900
 INFO_FETCH_TIMEOUT_SECONDS = 60
+
+# Render's Web Service type requires binding to a port and receiving HTTP
+# traffic to avoid sleeping after 15 min of inactivity. This tiny server just
+# answers "OK" so Render's health check passes and an external uptime pinger
+# (e.g. UptimeRobot) has something to hit periodically.
+RENDER_PORT = int(os.getenv("PORT", "10000"))
+
+
+class _HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"Bot is alive")
+
+    def log_message(self, format, *args):
+        pass  # keep this out of the terminal logs
+
+
+def start_health_server():
+    server = HTTPServer(("0.0.0.0", RENDER_PORT), _HealthCheckHandler)
+    logger.info(f"🌐 Health-check server listening on port {RENDER_PORT}")
+    server.serve_forever()
 
 # Max downloads actually running (yt-dlp subprocess) at the same time.
 # Extra requests wait in a queue instead of all hitting YouTube/the server at once.
@@ -564,7 +589,7 @@ async def download_and_send(url: str, fmt: str, quality: str, message, request_i
         command = [
             "yt-dlp",
             "-f", format_selector,
-            "--format-sort", "res,fps,vcodec:vp9,vcodec:av1,size,br",
+            "--format-sort", "res,fps,br,size",
             "--merge-output-format", "mp4",
             *common_ytdlp_flags(output_template)
         ]
@@ -729,7 +754,7 @@ async def download_and_send(url: str, fmt: str, quality: str, message, request_i
             quality_label = f"{quality}p"
 
         congrats_text = (
-            "🎉 Congratulations! Aapki file taiyar hai, party hi dede bas zyada kuch nai!\n\n"
+            "🎉 Congratulations! Aapki file taiyar hai!\n\n"
             f"{'🎵' if fmt == 'mp3' else '🎬'} {file_title}\n"
             f"📦 {fmt.upper()} • {quality_label}\n"
             f"💾 {size_mb:.1f} MB"
@@ -773,6 +798,9 @@ def main():
 
     init_db()
 
+    # Runs in a background thread so it doesn't interfere with the bot's own event loop
+    threading.Thread(target=start_health_server, daemon=True).start()
+
     builder = (
         Application.builder()
         .token(TOKEN)
@@ -803,7 +831,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_set_quality, pattern=r"^set(?:audio|video)q\|"))
 
     logger.info("🤖 Bot is active and listening for messages...")
-    app.run_polling(drop_pending_updates=True)
+    app.run_polling(drop_pending_updates=True, timeout=30)
 
 
 if __name__ == "__main__":
