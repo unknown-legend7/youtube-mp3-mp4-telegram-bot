@@ -798,6 +798,11 @@ def main():
 
     init_db()
 
+    if os.path.isfile(COOKIES_FILE):
+        logger.info(f"✅ Cookies file found: {COOKIES_FILE}")
+    else:
+        logger.warning(f"⚠️ Cookies file NOT found at: {COOKIES_FILE} — bot will run WITHOUT cookies")
+
     # Runs in a background thread so it doesn't interfere with the bot's own event loop
     threading.Thread(target=start_health_server, daemon=True).start()
 
