@@ -814,7 +814,13 @@ def main():
     init_db()
 
     if os.path.isfile(COOKIES_FILE):
-        logger.info(f"✅ Cookies file found: {COOKIES_FILE}")
+        _cookie_size = os.path.getsize(COOKIES_FILE)
+        logger.info(f"✅ Cookies file found: {COOKIES_FILE} ({_cookie_size} bytes)")
+        if _cookie_size < 200:
+            logger.warning(
+                f"⚠️ Cookies file looks suspiciously SMALL ({_cookie_size} bytes) — "
+                "a real YouTube cookies export is usually several KB. This may be empty/corrupted."
+            )
     else:
         logger.warning(f"⚠️ Cookies file NOT found at: {COOKIES_FILE} — bot will run WITHOUT cookies")
 
