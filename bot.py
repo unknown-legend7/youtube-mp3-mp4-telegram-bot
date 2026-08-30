@@ -35,6 +35,21 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 # Agar .env me define na ho to current directory me cookies.txt check karega
 COOKIES_FILE = os.getenv("YTDLP_COOKIES_FILE", os.path.join(os.path.dirname(__file__), "cookies.txt"))
+
+# Alternative for hosts with no file-upload/secret-file option: paste the ENTIRE
+# cookies.txt content into this one environment variable instead. Written to a
+# SEPARATE filename (not COOKIES_FILE) so this never collides with a read-only
+# Secret File mount (e.g. Render's /etc/secrets/ is read-only at runtime).
+COOKIES_CONTENT = os.getenv("YTDLP_COOKIES_CONTENT")
+if COOKIES_CONTENT:
+    _generated_cookies_path = os.path.join(os.path.dirname(__file__), "cookies_from_env.txt")
+    try:
+        with open(_generated_cookies_path, "w") as _f:
+            _f.write(COOKIES_CONTENT)
+        COOKIES_FILE = _generated_cookies_path
+        logger.info(f"✅ Wrote cookies from YTDLP_COOKIES_CONTENT to {COOKIES_FILE}")
+    except Exception as _cookie_write_err:
+        logger.error(f"❌ Failed to write cookies from YTDLP_COOKIES_CONTENT: {_cookie_write_err}")
 LOCAL_API_URL = os.getenv("TELEGRAM_LOCAL_API_URL")
 DB_PATH = os.getenv("BOT_DB_PATH", "bot_data.db")
 
