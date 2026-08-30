@@ -113,7 +113,7 @@ PROGRESS_RE = re.compile(
 )
 
 # FIXED: Removed missing_pot and broken ios clients which caused "Requested format not available"
-YOUTUBE_EXTRACTOR_ARGS = "youtube:player_client=android,web"
+YOUTUBE_EXTRACTOR_ARGS = "youtube:player_client=ios,tv;player_skip=webpage,configs"
 
 
 # ---------------------------------------------------------------------------
