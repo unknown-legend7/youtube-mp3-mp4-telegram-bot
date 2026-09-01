@@ -131,7 +131,8 @@ PROGRESS_RE = re.compile(
 # a valid PO token isn't present, even though yt-dlp COULD still fetch them.
 # This extractor-arg tells yt-dlp to include those formats anyway instead of
 # silently falling back to a lower max resolution. See yt-dlp issue #12963.
-YOUTUBE_EXTRACTOR_ARGS = "youtube:player_client=web,android;formats=missing_pot"
+# Change this line:
+YOUTUBE_EXTRACTOR_ARGS = "youtube:player_client=android,web"
 
 
 # ---------------------------------------------------------------------------
