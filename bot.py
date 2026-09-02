@@ -289,6 +289,7 @@ async def get_video_info(url):
     """Fetch title + duration without downloading."""
     command = [
         "yt-dlp", "-J", "--no-playlist", "--no-warnings",
+        "--ignore-no-formats-error",
         "--extractor-args", YOUTUBE_EXTRACTOR_ARGS,
         *pot_provider_flags(),
     ]
