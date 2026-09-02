@@ -131,8 +131,24 @@ PROGRESS_RE = re.compile(
 # a valid PO token isn't present, even though yt-dlp COULD still fetch them.
 # This extractor-arg tells yt-dlp to include those formats anyway instead of
 # silently falling back to a lower max resolution. See yt-dlp issue #12963.
-# Change this line:
-YOUTUBE_EXTRACTOR_ARGS = "youtube:player_client=android,web"
+YOUTUBE_EXTRACTOR_ARGS = "youtube:player_client=web,android;formats=missing_pot"
+
+# As of 2025-26, YouTube requires a valid PO (Proof-of-Origin) token on most
+# requests -- cookies alone are no longer enough, which is why "Sign in to
+# confirm you're not a bot" can still show up even with a valid cookies file.
+# If YTDLP_POT_PROVIDER_URL is set (pointing at a running bgutil-ytdlp-pot-provider
+# HTTP server -- see https://github.com/Brainicism/bgutil-ytdlp-pot-provider),
+# yt-dlp will fetch real PO tokens from it instead of guessing. Optional: if
+# unset, the bot falls back to cookies-only behaviour exactly as before.
+POT_PROVIDER_URL = os.getenv("YTDLP_POT_PROVIDER_URL")
+
+
+def pot_provider_flags():
+    """Extra --extractor-args pair that points yt-dlp at the PO token provider,
+    if one has been configured. Returns [] when not configured."""
+    if not POT_PROVIDER_URL:
+        return []
+    return ["--extractor-args", f"youtubepot-bgutilhttp:base_url={POT_PROVIDER_URL}"]
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +268,7 @@ def common_ytdlp_flags(output_template):
     flags = [
         "--no-playlist",
         "--extractor-args", YOUTUBE_EXTRACTOR_ARGS,
+        *pot_provider_flags(),
         "--concurrent-fragments", "4",
         "--newline",
         "--no-warnings",
@@ -267,6 +284,7 @@ async def get_video_info(url):
     command = [
         "yt-dlp", "-J", "--no-playlist", "--no-warnings",
         "--extractor-args", YOUTUBE_EXTRACTOR_ARGS,
+        *pot_provider_flags(),
     ]
     if os.path.isfile(COOKIES_FILE):
         command += ["--cookies", COOKIES_FILE]
@@ -824,6 +842,15 @@ def main():
             )
     else:
         logger.warning(f"⚠️ Cookies file NOT found at: {COOKIES_FILE} — bot will run WITHOUT cookies")
+
+    if POT_PROVIDER_URL:
+        logger.info(f"✅ PO token provider configured: {POT_PROVIDER_URL}")
+    else:
+        logger.warning(
+            "⚠️ YTDLP_POT_PROVIDER_URL not set — running cookies-only. "
+            "If 'Sign in to confirm you're not a bot' persists despite valid cookies, "
+            "set up bgutil-ytdlp-pot-provider and point this env var at it."
+        )
 
     # Runs in a background thread so it doesn't interfere with the bot's own event loop
     threading.Thread(target=start_health_server, daemon=True).start()
