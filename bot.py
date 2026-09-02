@@ -142,6 +142,12 @@ YOUTUBE_EXTRACTOR_ARGS = "youtube:player_client=web,android;formats=missing_pot"
 # unset, the bot falls back to cookies-only behaviour exactly as before.
 POT_PROVIDER_URL = os.getenv("YTDLP_POT_PROVIDER_URL")
 
+# Temporary diagnostic switch: set DEBUG_YTDLP=1 on Render to make the info-fetch
+# call run with --verbose, so failures log yt-dlp's internal debug lines --
+# including whether it actually found/used the PO token provider. Turn this
+# off again once things are working; verbose output is noisy.
+DEBUG_YTDLP = os.getenv("DEBUG_YTDLP", "").strip().lower() in ("1", "true", "yes")
+
 
 def pot_provider_flags():
     """Extra --extractor-args pair that points yt-dlp at the PO token provider,
@@ -286,6 +292,8 @@ async def get_video_info(url):
         "--extractor-args", YOUTUBE_EXTRACTOR_ARGS,
         *pot_provider_flags(),
     ]
+    if DEBUG_YTDLP:
+        command.append("--verbose")
     if os.path.isfile(COOKIES_FILE):
         command += ["--cookies", COOKIES_FILE]
     command.append(url)
