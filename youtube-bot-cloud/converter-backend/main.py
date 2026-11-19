@@ -1,48 +1,131 @@
-import re
-import yt_dlp
-from urllib.parse import urlparse
-import os
-import uuid
 import asyncio
-import shutil
+import hmac
+import json
+import math
+import os
 import tempfile
 from pathlib import Path
 
-from fastapi import FastAPI, UploadFile, File, Form, Header, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi.responses import FileResponse, JSONResponse
 from starlette.background import BackgroundTask
-
-app = FastAPI(title="Media Conversion API")
+from starlette.datastructures import Headers
 
 API_KEY = os.getenv("CONVERTER_API_KEY", "")
-MAX_FILE_SIZE = 100 * 1024 * 1024  # 100 MB
+MAX_SIZE = 20_000_000
+MAX_REQUEST = MAX_SIZE + 64_000
+MAX_SECONDS = 600
+BITRATES = {"64k", "128k", "192k", "256k", "320k"}
+RESOLUTIONS = {"360p": (640, 360), "480p": (854, 480),
+               "720p": (1280, 720), "1080p": (1920, 1080)}
+EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".mp3", ".wav", ".m4a", ".aac", ".ogg"}
+DEMUXERS = "mov,matroska,webm,mp3,wav,aac,ogg"
+app = FastAPI(title="Media Conversion API")
 
-ALLOWED_EXTENSIONS = {
-    ".mp4", ".mov", ".mkv", ".webm",
-    ".mp3", ".wav", ".m4a", ".aac", ".ogg"
-}
 
-def cleanup(path: str):
-    shutil.rmtree(path, ignore_errors=True)
-
-def check_api_key(key: str):
+def check_key(key):
     if not API_KEY:
-        raise HTTPException(500, "Server API key is not configured")
-
-    if key != API_KEY:
+        raise HTTPException(503, "Conversion service is unavailable.")
+    if not hmac.compare_digest(key.encode(), API_KEY.encode()):
         raise HTTPException(401, "Invalid API key")
+
+
+class ConversionLimits:
+    def __init__(self, app):
+        self.app = app
+        self.active = False
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope["method"] != "POST" or scope["path"] != "/convert":
+            await self.app(scope, receive, send)
+            return
+        try:
+            headers = Headers(scope=scope)
+            check_key(headers.get("x-api-key", ""))
+            size = headers.get("content-length")
+            if size is not None and (not size.isdecimal() or int(size) > MAX_REQUEST):
+                raise HTTPException(413, "Maximum input size is 20 MB.")
+            if self.active:
+                raise HTTPException(429, "Converter is busy. Try again shortly.")
+        except HTTPException as exc:
+            await JSONResponse({"detail": exc.detail}, exc.status_code)(scope, receive, send)
+            return
+
+        self.active = True
+        received = 0
+        deadline = asyncio.get_running_loop().time() + 45
+
+        async def limited_receive():
+            nonlocal received
+            try:
+                async with asyncio.timeout_at(deadline):
+                    message = await receive()
+            except TimeoutError:
+                raise HTTPException(408, "Upload timed out.") from None
+            received += len(message.get("body", b""))
+            if received > MAX_REQUEST:
+                raise HTTPException(413, "Maximum input size is 20 MB.")
+            return message
+
+        try:
+            await self.app(scope, limited_receive, send)
+        finally:
+            self.active = False
+
+
+app.add_middleware(ConversionLimits)
+
 
 @app.get("/")
 async def home():
-    return {
-        "status": "online",
-        "service": "Media Conversion API",
-        "supported_formats": ["mp3", "mp4"]
-    }
+    return {"status": "online", "service": "Media Conversion API",
+            "supported_formats": ["mp3", "mp4"]}
+
 
 @app.get("/health")
 async def health():
     return {"status": "healthy"}
+
+
+async def run_media_tool(command, timeout, capture=False):
+    process = await asyncio.create_subprocess_exec(
+        *command, stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE if capture else asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        output, _ = await asyncio.wait_for(process.communicate(), timeout)
+    except (TimeoutError, asyncio.CancelledError):
+        if process.returncode is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+        await process.communicate()
+        raise
+    if process.returncode:
+        raise HTTPException(422, "This media could not be read or converted.")
+    return output
+
+
+async def probe(path):
+    data = json.loads(await run_media_tool([
+        "ffprobe", "-v", "error", "-protocol_whitelist", "file",
+        "-format_whitelist", DEMUXERS, "-max_alloc", "67108864",
+        "-show_entries", "format=duration:stream=codec_type,width,height",
+        "-of", "json", str(path),
+    ], 12, capture=True))
+    try:
+        duration = float(data["format"]["duration"])
+    except (KeyError, ValueError, TypeError):
+        raise HTTPException(422, "Could not determine media duration.") from None
+    if not math.isfinite(duration) or not 0 < duration <= MAX_SECONDS:
+        raise HTTPException(422, "Media must be 10 minutes or shorter.")
+    streams = data.get("streams", [])
+    if any(s.get("width", 0) * s.get("height", 0) > 4096 * 2160 for s in streams):
+        raise HTTPException(422, "Source dimensions exceed the supported limit.")
+    return {s["codec_type"] for s in streams if "codec_type" in s}
+
 
 @app.post("/convert")
 async def convert_media(
@@ -50,261 +133,74 @@ async def convert_media(
     output_format: str = Form(...),
     audio_bitrate: str = Form("192k"),
     video_resolution: str = Form("720p"),
-    x_api_key: str = Header(default="")
 ):
-    check_api_key(x_api_key)
-
     output_format = output_format.lower()
-
-    if output_format not in ["mp3", "mp4"]:
-        raise HTTPException(400, "Format must be mp3 or mp4")
-
     extension = Path(file.filename or "").suffix.lower()
+    mime = file.content_type or ""
+    if extension not in EXTENSIONS or not (
+        mime.startswith(("audio/", "video/")) or mime in {"application/octet-stream", "application/ogg"}
+    ):
+        raise HTTPException(415, "Upload a supported video or audio file.")
+    if output_format not in {"mp3", "mp4"} or audio_bitrate not in BITRATES:
+        raise HTTPException(400, "Invalid output format or audio bitrate.")
+    if video_resolution not in {*RESOLUTIONS, "source"}:
+        raise HTTPException(400, "Invalid video resolution.")
 
-    if extension not in ALLOWED_EXTENSIONS:
-        raise HTTPException(400, "Unsupported input file type")
-
-    allowed_bitrates = ["128k", "192k", "256k", "320k"]
-
-    if audio_bitrate not in allowed_bitrates:
-        raise HTTPException(400, "Invalid audio bitrate")
-
-    resolutions = {
-        "360p": "640x360",
-        "480p": "854x480",
-        "720p": "1280x720",
-        "1080p": "1920x1080"
-    }
-
-    if video_resolution not in resolutions:
-        raise HTTPException(400, "Invalid resolution")
-
-    temp_dir = tempfile.mkdtemp(prefix="converter_")
-
-    input_path = os.path.join(temp_dir, "input" + extension)
-    output_path = os.path.join(temp_dir, f"output.{output_format}")
-
+    temp = tempfile.TemporaryDirectory(prefix="converter_")
+    source = Path(temp.name) / ("input" + extension)
+    output = Path(temp.name) / f"converted.{output_format}"
+    response_ready = False
     try:
         size = 0
-
-        with open(input_path, "wb") as destination:
-            while True:
-                chunk = await file.read(1024 * 1024)
-
-                if not chunk:
-                    break
-
+        with source.open("wb") as destination:
+            while chunk := await file.read(256 * 1024):
                 size += len(chunk)
-
-                if size > MAX_FILE_SIZE:
-                    raise HTTPException(413, "File exceeds 100 MB limit")
-
+                if size > MAX_SIZE:
+                    raise HTTPException(413, "Maximum input size is 20 MB.")
                 destination.write(chunk)
 
+        streams = await probe(source)
+        command = [
+            "ffmpeg", "-nostdin", "-loglevel", "error", "-protocol_whitelist", "file",
+            "-format_whitelist", DEMUXERS, "-max_alloc", "67108864",
+            "-threads", "2", "-i", str(source), "-filter_threads", "1", "-t", str(MAX_SECONDS),
+            "-map_metadata", "-1", "-map_chapters", "-1",
+        ]
         if output_format == "mp3":
-            command = [
-                "ffmpeg",
-                "-y",
-                "-i", input_path,
-                "-vn",
-                "-codec:a", "libmp3lame",
-                "-b:a", audio_bitrate,
-                output_path
-            ]
+            if "audio" not in streams:
+                raise HTTPException(422, "This video has no audio track.")
+            command += ["-map", "0:a:0", "-c:a", "libmp3lame", "-b:a", audio_bitrate]
         else:
-            resolution = resolutions[video_resolution]
-
-            command = [
-                "ffmpeg",
-                "-y",
-                "-i", input_path,
-                "-vf", f"scale={resolution}:force_original_aspect_ratio=decrease",
-                "-c:v", "libx264",
-                "-preset", "veryfast",
-                "-crf", "23",
-                "-c:a", "aac",
-                "-b:a", "128k",
-                "-movflags", "+faststart",
-                output_path
+            if "video" not in streams:
+                raise HTTPException(422, "This file has no video track.")
+            # Fit the selected box in either orientation, without upscaling.
+            width, height = RESOLUTIONS.get(video_resolution, (1920, 1080))
+            scale = (f"scale=w='min(iw,if(gte(iw,ih),{width},{height}))':"
+                     f"h='min(ih,if(gte(iw,ih),{height},{width}))':"
+                     "force_original_aspect_ratio=decrease:force_divisible_by=2")
+            command += [
+                "-map", "0:V:0", "-map", "0:a:0?", "-vf", scale,
+                "-c:v", "libx264", "-threads", "2", "-preset", "ultrafast",
+                "-crf", "24", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                "-b:a", "128k", "-movflags", "+faststart",
             ]
-
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE
+        await run_media_tool(command + ["-fs", str(MAX_SIZE), str(output)], 90)
+        if output.stat().st_size >= MAX_SIZE:
+            raise HTTPException(413, "Output exceeds 20 MB. Try a shorter clip or lower quality.")
+        response = FileResponse(
+            output, media_type="audio/mpeg" if output_format == "mp3" else "video/mp4",
+            filename=output.name, background=BackgroundTask(temp.cleanup),
         )
-
-        _, stderr = await process.communicate()
-
-        if process.returncode != 0:
-            error = stderr.decode(errors="ignore")[-2000:]
-            print("FFmpeg error:", error)
-            raise HTTPException(500, "Conversion failed")
-
-        if not os.path.exists(output_path):
-            raise HTTPException(500, "Output file was not created")
-
-        return FileResponse(
-            output_path,
-            media_type=(
-                "audio/mpeg" if output_format == "mp3"
-                else "video/mp4"
-            ),
-            filename=f"converted.{output_format}",
-            background=BackgroundTask(cleanup, temp_dir)
-        )
-
-    except Exception:
-        cleanup(temp_dir)
-        raise
-
+        response_ready = True
+        return response
+    except TimeoutError:
+        raise HTTPException(504, "Conversion timed out. Try a shorter clip.") from None
     finally:
-        await file.close()
+        if not response_ready:
+            temp.cleanup()
 
-# YouTube URL conversion
-# Only use for media you own or are authorized to download.
-
-ALLOWED_YOUTUBE_HOSTS = {
-    "youtube.com",
-    "www.youtube.com",
-    "m.youtube.com",
-    "youtu.be",
-}
 
 @app.post("/convert-url")
-async def convert_url(
-    url: str = Form(...),
-    output_format: str = Form(...),
-    audio_bitrate: str = Form("192k"),
-    video_resolution: str = Form("720p"),
-    x_api_key: str = Header(default="")
-):
-    check_api_key(x_api_key)
-
-    parsed = urlparse(url.strip())
-
-    if (
-        parsed.scheme != "https"
-        or parsed.hostname not in ALLOWED_YOUTUBE_HOSTS
-        or parsed.username
-        or parsed.password
-        or parsed.port
-    ):
-        raise HTTPException(400, "Invalid YouTube URL")
-
-    if output_format not in ("mp3", "mp4"):
-        raise HTTPException(400, "Invalid output format")
-
-    if audio_bitrate not in ("128k", "192k", "256k", "320k"):
-        raise HTTPException(400, "Invalid audio bitrate")
-
-    if video_resolution not in ("360p", "480p", "720p", "1080p"):
-        raise HTTPException(400, "Invalid video resolution")
-
-    temp_dir = tempfile.mkdtemp(prefix="youtube_")
-    output_path = os.path.join(temp_dir, f"converted.{output_format}")
-
-    try:
-        def download_and_convert():
-            source_template = os.path.join(temp_dir, "source.%(ext)s")
-
-            height = int(video_resolution[:-1])
-
-            options = {
-                "outtmpl": source_template,
-                "format": (
-                    "bestaudio/best"
-                    if output_format == "mp3"
-                    else f"bestvideo[height<={height}]+bestaudio/"
-                         f"best[height<={height}]"
-                ),
-                "merge_output_format": "mp4",
-                "noplaylist": True,
-                "quiet": True,
-                "no_warnings": True,
-                "socket_timeout": 15,
-                "retries": 1,
-                "match_filter": yt_dlp.utils.match_filter_func(
-                    "duration <= 600"
-                ),
-                "max_filesize": 20 * 1024 * 1024,
-            }
-
-            with yt_dlp.YoutubeDL(options) as downloader:
-                info = downloader.extract_info(url, download=True)
-                source_path = downloader.prepare_filename(info)
-
-            if not os.path.exists(source_path):
-                candidates = [
-                    path for path in Path(temp_dir).glob("source.*")
-                    if path.is_file()
-                ]
-
-                if not candidates:
-                    raise RuntimeError("Downloaded media not found")
-
-                source_path = str(candidates[0])
-
-            if output_format == "mp3":
-                command = [
-                    "ffmpeg", "-y",
-                    "-i", source_path,
-                    "-vn",
-                    "-codec:a", "libmp3lame",
-                    "-b:a", audio_bitrate,
-                    output_path,
-                ]
-            else:
-                command = [
-                    "ffmpeg", "-y",
-                    "-i", source_path,
-                    "-vf",
-                    f"scale=-2:min({height}\\,ih)",
-                    "-c:v", "libx264",
-                    "-preset", "veryfast",
-                    "-crf", "23",
-                    "-c:a", "aac",
-                    "-b:a", "128k",
-                    "-movflags", "+faststart",
-                    output_path,
-                ]
-
-            result = __import__("subprocess").run(
-                command,
-                capture_output=True,
-                timeout=120,
-            )
-
-            if result.returncode != 0:
-                raise RuntimeError("FFmpeg conversion failed")
-
-            if not os.path.isfile(output_path):
-                raise RuntimeError("Output file missing")
-
-            if os.path.getsize(output_path) > 20 * 1024 * 1024:
-                raise RuntimeError("Converted file exceeds 20 MB")
-
-        await asyncio.wait_for(
-            asyncio.to_thread(download_and_convert),
-            timeout=180,
-        )
-
-        return FileResponse(
-            output_path,
-            media_type=(
-                "audio/mpeg"
-                if output_format == "mp3"
-                else "video/mp4"
-            ),
-            filename=f"converted.{output_format}",
-            background=BackgroundTask(cleanup, temp_dir),
-        )
-
-    except TimeoutError:
-        cleanup(temp_dir)
-        raise HTTPException(504, "Conversion timed out")
-
-    except Exception as exc:
-        cleanup(temp_dir)
-        print("URL conversion error:", str(exc))
-        raise HTTPException(500, "URL conversion failed")
+async def convert_url(x_api_key: str = Header(default="")):
+    check_key(x_api_key)
+    raise HTTPException(503, "YouTube retrieval is currently unavailable. Upload an authorized file.")
