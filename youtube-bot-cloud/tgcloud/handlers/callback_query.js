@@ -1,5 +1,6 @@
 import { api, db, fetch, FormData, InputFile } from 'sdk';
 import { sql } from 'sdk/db';
+import { imageCallback } from '../lib/images.js';
 import { AUDIO, BACKEND, MAX_SIZE, videoChoices } from '../lib/converter.js';
 
 const FAILURE = {
@@ -13,7 +14,30 @@ const FAILURE = {
     504: 'Conversion timed out. Try a shorter clip.',
 };
 
+const GUIDES = {
+    media: 'Upload a video and choose MP3 or MP4. Maximum 20 MB and 10 minutes.',
+    image: 'Upload a JPG, PNG, WebP, BMP or TIFF. Send it as a file to retain the original.',
+    compress: 'Upload an image, choose Compress, then select an output format and compression level.',
+    pdf: 'Upload one image and choose Image to PDF. For multiple images, send /imagepdf.',
+    help: 'Send /help for available tools and limits.',
+};
+
 export default async function (query) {
+    if (query.data?.startsWith('guide:')) {
+        const topic = query.data.slice(6);
+        await api.answerCallbackQuery({ callback_query_id: query.id,
+            text: Object.hasOwn(GUIDES, topic) ? GUIDES[topic] : GUIDES.help, show_alert: true });
+        return;
+    }
+    if (query.data?.startsWith('i:')) {
+        try {
+            await imageCallback(query);
+        } catch {
+            console.error('Image callback failed.');
+            await api.answerCallbackQuery({ callback_query_id: query.id, text: 'Image tools are temporarily unavailable.' }).catch(() => {});
+        }
+        return;
+    }
     const match = /^(m|q):(\d+):(mp3|mp4)(?::(\w+))?$/.exec(query.data || '');
     const message = query.message;
     const answer = (text) => api.answerCallbackQuery({ callback_query_id: query.id, text });

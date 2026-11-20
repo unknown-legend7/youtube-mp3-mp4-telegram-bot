@@ -1,8 +1,9 @@
 import { api, db, fetch } from 'sdk';
 import { sql } from 'sdk/db';
 import { BACKEND, MAX_SIZE } from '../lib/converter.js';
+import { imageMessage } from '../lib/images.js';
 
-const HELP = 'Send a video you own or have permission to convert (up to 20 MB and 10 minutes). Choose MP3 or MP4, then pick a quality. YouTube links are currently unavailable.';
+const HELP = 'All-in-one File Converter\n\nSend a video for MP3 or MP4, or an image to convert, compress, resize, or make a PDF. Maximum 20 MB. Use /imagepdf to combine images and /cancel to close pending image menus. YouTube link conversion is unavailable.';
 
 export default async function (message) {
     const chat_id = message.chat.id;
@@ -11,7 +12,13 @@ export default async function (message) {
     const command = text.split(/[@\s]/, 1)[0];
 
     if (command === '/start' || command === '/help') {
-        await send(HELP);
+        await send(HELP, command === '/start' ? {
+            reply_markup: { inline_keyboard: [
+                [{ text: 'Audio & Video', callback_data: 'guide:media' }, { text: 'Image Converter', callback_data: 'guide:image' }],
+                [{ text: 'Image Compressor', callback_data: 'guide:compress' }, { text: 'Images to PDF', callback_data: 'guide:pdf' }],
+                [{ text: 'Help', callback_data: 'guide:help' }],
+            ] },
+        } : {});
         return;
     }
 
@@ -26,7 +33,19 @@ export default async function (message) {
         return;
     }
 
+    try {
+        if (await imageMessage(message, command, send)) return;
+    } catch {
+        console.error('Image message workflow failed.');
+        await send('Image tools are temporarily unavailable.');
+        return;
+    }
+
     const file = message.video || message.document;
+    if (!file && /(?:^|[\s(])(?:https?:\/\/)?(?:(?:www|m|music)\.)?(?:youtube\.com|youtu\.be)\//i.test(text)) {
+        await send('YouTube link received. Link conversion is currently unavailable. Upload a video you own or have permission to convert, and I can convert it to MP3 or MP4.');
+        return;
+    }
     if (!file || !message.from || message.sender_chat) {
         await send(HELP);
         return;

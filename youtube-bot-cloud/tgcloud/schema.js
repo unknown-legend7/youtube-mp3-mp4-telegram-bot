@@ -9,6 +9,7 @@ export const uploads = table('conversion_uploads', {
     filename: text('filename').notNull(),
     mime: text('mime').notNull(),
     shortEdge: integer('short_edge').notNull(),
+    batchId: integer('batch_id'),
     createdAt: integer('created_at').notNull(),
     startedAt: integer('started_at'),
     finishedAt: integer('finished_at'),
