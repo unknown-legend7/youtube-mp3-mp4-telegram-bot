@@ -3,3 +3,10 @@ uvicorn[standard]
 python-multipart
 Pillow
 reportlab
+pypdf[crypto]>=7,<8
+pypdfium2
+pdfplumber
+python-docx
+python-pptx
+openpyxl
+WeasyPrint>=69

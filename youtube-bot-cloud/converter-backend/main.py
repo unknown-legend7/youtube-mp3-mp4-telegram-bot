@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from starlette.background import BackgroundTask
 from starlette.datastructures import Headers
 from image_routes import router as image_router
+from document_routes import router as document_router
 
 API_KEY = os.getenv("CONVERTER_API_KEY", "")
 MAX_SIZE = 20_000_000
@@ -37,7 +38,7 @@ class ConversionLimits:
         self.active = False
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or scope["method"] != "POST" or scope["path"] not in {"/convert", "/convert-image"}:
+        if scope["type"] != "http" or scope["method"] != "POST" or scope["path"] not in {"/convert", "/convert-image", "/convert-document"}:
             await self.app(scope, receive, send)
             return
         try:
@@ -76,6 +77,7 @@ class ConversionLimits:
 
 app.add_middleware(ConversionLimits)
 app.include_router(image_router)
+app.include_router(document_router)
 
 
 @app.get("/")
