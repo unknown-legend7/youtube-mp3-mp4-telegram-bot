@@ -44,21 +44,35 @@ def sandbox(directory):
 
 @lru_cache(maxsize=1)
 def native_features():
-    available = {"office": False, "pdfa": False}
-    if os.getenv("CONVERTER_ENABLE_NATIVE_DOCUMENTS") != "1" or not Path(BWRAP).is_file():
-        return available
+    unavailable = {"office": False, "pdfa": False}
+    if os.getenv("CONVERTER_ENABLE_NATIVE_DOCUMENTS") != "1":
+        return {**unavailable, "native_status": "activation_disabled"}
+
+    office = Path(OFFICE).is_file()
+    pdfa = all(Path(path).is_file() for path in (GHOSTSCRIPT, VERAPDF, ICC))
+    if not Path(BWRAP).is_file() or not (office or pdfa):
+        return {**unavailable, "native_status": "packages_missing"}
+
     import tempfile
 
     try:
         with tempfile.TemporaryDirectory() as directory:
-            result = subprocess.run(sandbox(directory) + ["/usr/bin/true"],
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=4)
-        if result.returncode:
-            return available
-    except (OSError, TimeoutError, subprocess.TimeoutExpired):
-        return available
-    return {"office": Path(OFFICE).is_file(),
-            "pdfa": all(Path(path).is_file() for path in (GHOSTSCRIPT, VERAPDF, ICC))}
+            result = subprocess.run(
+                sandbox(directory) + ["/usr/bin/true"], stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE, text=True, errors="replace", timeout=4,
+            )
+    except (TimeoutError, subprocess.TimeoutExpired):
+        return {**unavailable, "native_status": "sandbox_timeout"}
+    except OSError:
+        return {**unavailable, "native_status": "sandbox_failed"}
+    if result.returncode:
+        stderr = result.stderr.lower()
+        denied = any(marker in stderr for marker in (
+            "operation not permitted", "permission denied", "no permissions",
+        ))
+        return {**unavailable, "native_status": "sandbox_denied" if denied else "sandbox_failed"}
+    return {"office": office, "pdfa": pdfa,
+            "native_status": "ready" if office and pdfa else "partially_ready"}
 
 
 def native_command(directory, args, stdout=subprocess.DEVNULL, accepted=(0,)):

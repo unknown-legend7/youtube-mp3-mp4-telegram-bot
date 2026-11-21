@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 from zipfile import ZipFile
+import subprocess
 
 from docx import Document
 from httpx import ASGITransport, AsyncClient
@@ -18,6 +19,7 @@ from reportlab.pdfgen import canvas
 from document_native import inspect_office_archive, validate_pdfa_report
 from pdf_tools import JobError
 import document_routes
+import document_native
 import main
 
 
@@ -235,3 +237,34 @@ class DocumentTests(unittest.IsolatedAsyncioTestCase):
         pdf = self.read_pdf(result)
         self.assertIn("Synthetic page 1", pdf.pages[0].extract_text())
         self.assertIn("/OutputIntents", pdf.root_object)
+
+
+class NativeReadinessTests(unittest.TestCase):
+    def setUp(self):
+        document_native.native_features.cache_clear()
+        self.addCleanup(document_native.native_features.cache_clear)
+
+    def test_reports_activation_and_missing_packages(self):
+        with patch.dict(os.environ, {"CONVERTER_ENABLE_NATIVE_DOCUMENTS": "0"}):
+            self.assertEqual(document_native.native_features(), {
+                "office": False, "pdfa": False, "native_status": "activation_disabled",
+            })
+        document_native.native_features.cache_clear()
+        with patch.dict(os.environ, {"CONVERTER_ENABLE_NATIVE_DOCUMENTS": "1"}), patch.object(Path, "is_file", return_value=False):
+            self.assertEqual(document_native.native_features(), {
+                "office": False, "pdfa": False, "native_status": "packages_missing",
+            })
+
+    def test_sandbox_failure_is_sanitized_and_keeps_conversions_disabled(self):
+        completed = subprocess.CompletedProcess([], 1, stderr="bwrap: Creating new namespace: Operation not permitted")
+        with patch.dict(os.environ, {"CONVERTER_ENABLE_NATIVE_DOCUMENTS": "1"}), patch.object(Path, "is_file", return_value=True), patch.object(document_native.subprocess, "run", return_value=completed):
+            self.assertEqual(document_native.native_features(), {
+                "office": False, "pdfa": False, "native_status": "sandbox_denied",
+            })
+
+    def test_optional_tools_are_available_after_successful_isolation(self):
+        completed = subprocess.CompletedProcess([], 0, stderr="")
+        with patch.dict(os.environ, {"CONVERTER_ENABLE_NATIVE_DOCUMENTS": "1"}), patch.object(Path, "is_file", return_value=True), patch.object(document_native.subprocess, "run", return_value=completed):
+            self.assertEqual(document_native.native_features(), {
+                "office": True, "pdfa": True, "native_status": "ready",
+            })
