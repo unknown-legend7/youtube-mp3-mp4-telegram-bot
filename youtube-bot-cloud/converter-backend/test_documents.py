@@ -9,7 +9,7 @@ from zipfile import ZipFile
 import subprocess
 
 from docx import Document
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport, AsyncClient, ByteStream, MockTransport, Response
 from openpyxl import load_workbook
 from PIL import Image
 from pptx import Presentation
@@ -20,6 +20,7 @@ from document_native import inspect_office_archive, validate_pdfa_report
 from pdf_tools import JobError
 import document_routes
 import document_native
+import native_relay
 import main
 
 
@@ -41,7 +42,7 @@ def sample_pdf(table=False, pages=3):
     return buffer.getvalue()
 
 
-class DocumentTests(unittest.IsolatedAsyncioTestCase):
+class DocumentAPI(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         key = patch.object(main, "API_KEY", "test-key")
         key.start()
@@ -64,6 +65,7 @@ class DocumentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status_code, 200, result.text[:200] if result.is_error else "")
         return PdfReader(io.BytesIO(result.content))
 
+class DocumentTests(DocumentAPI):
     async def test_pdf_render_ranged_zip_and_first_page(self):
         first = await self.convert("jpg", options={"dpi": 72})
         self.assertEqual(first.status_code, 200)
@@ -268,3 +270,76 @@ class NativeReadinessTests(unittest.TestCase):
             self.assertEqual(document_native.native_features(), {
                 "office": True, "pdfa": True, "native_status": "ready",
             })
+
+
+class RemoteNativeWorkerTests(DocumentAPI):
+    async def test_remote_capabilities_use_only_worker_native_status(self):
+        def upstream(request):
+            self.assertEqual(request.url.path, "/native-worker-capabilities")
+            self.assertEqual(request.headers["x-api-key"], "test-worker-secret")
+            return Response(200, stream=ByteStream(b'{"office":true,"pdfa":true}'))
+
+        with self.configure(upstream):
+            response = await self.client.get("/document-capabilities")
+            self.assertEqual(response.json()["native_status"], "remote_ready")
+            self.assertTrue(response.json()["office"])
+            rejected = await self.client.get("/native-worker-capabilities")
+            self.assertEqual(rejected.status_code, 401)
+            local = await self.client.get("/native-worker-capabilities", headers={"x-api-key": "test-key"})
+            self.assertFalse(local.json()["office"])
+
+    async def test_remote_office_and_pdfa_require_expected_pdf_response(self):
+        archive_verified = False
+        calls = []
+        pdf = sample_pdf(pages=1)
+
+        async def upstream(request):
+            self.assertEqual(request.url.path, "/convert-document")
+            self.assertEqual(request.headers["x-api-key"], "test-worker-secret")
+            self.assertEqual(request.headers[native_relay.LOCAL_ONLY_HEADER], "1")
+            payload = await request.aread()
+            calls.append(payload)
+            headers = {"content-type": "application/pdf"}
+            if archive_verified:
+                headers["x-conversion-note"] = native_relay.ARCHIVE_NOTE
+            return Response(200, headers=headers, stream=ByteStream(pdf))
+
+        with self.configure(upstream):
+            office = await self.convert("office", [("source.docx", b"fixture")])
+            self.assertEqual(len(self.read_pdf(office).pages), 1)
+            self.assertIn(b'filename="input-0.docx"', calls[0])
+            archive = await self.convert("pdfa")
+            self.assertEqual(archive.status_code, 502)
+            archive_verified = True
+            archive = await self.convert("pdfa")
+            self.assertEqual(len(self.read_pdf(archive).pages), 1)
+            self.assertEqual(archive.headers["x-conversion-note"], native_relay.ARCHIVE_NOTE)
+
+    async def test_native_only_request_cannot_loop_or_forward_standard_operations(self):
+        def unexpected(request):
+            self.fail("A local-only or standard document request must never be relayed.")
+
+        with self.configure(unexpected):
+            local = await self.client.post(
+                "/convert-document", data={"action": "pdfa"},
+                headers={"x-api-key": "test-key", native_relay.LOCAL_ONLY_HEADER: "1"},
+                files={"file": ("source.pdf", sample_pdf(), "application/pdf")},
+            )
+            self.assertEqual(local.status_code, 503)
+            self.assertEqual((await self.convert("inspect")).status_code, 200)
+
+    def configure(self, handler):
+        from contextlib import ExitStack
+
+        stack = ExitStack()
+        stack.enter_context(patch.dict(os.environ, {
+            "NATIVE_WORKER_URL": "https://native.example.test",
+            "NATIVE_WORKER_API_KEY": "test-worker-secret",
+        }))
+        stack.enter_context(patch.object(document_routes, "native_features", return_value={
+            "office": False, "pdfa": False, "native_status": "sandbox_denied",
+        }))
+        stack.enter_context(patch.object(native_relay, "client", side_effect=lambda timeout: AsyncClient(
+            timeout=timeout, transport=MockTransport(handler), follow_redirects=False, trust_env=False,
+        )))
+        return stack

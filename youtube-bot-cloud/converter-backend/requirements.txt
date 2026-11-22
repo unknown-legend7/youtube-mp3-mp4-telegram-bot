@@ -10,3 +10,4 @@ python-docx
 python-pptx
 openpyxl
 WeasyPrint>=69
+httpx>=0.28,<1

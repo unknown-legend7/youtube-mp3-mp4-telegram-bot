@@ -38,12 +38,19 @@ class ConversionLimits:
         self.active = False
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or scope["method"] != "POST" or scope["path"] not in {"/convert", "/convert-image", "/convert-document"}:
+        http = scope["type"] == "http"
+        probe = http and scope["method"] == "GET" and scope["path"] == "/native-worker-capabilities"
+        conversion = (http and scope["method"] == "POST"
+                      and scope["path"] in {"/convert", "/convert-image", "/convert-document"})
+        if not (probe or conversion):
             await self.app(scope, receive, send)
             return
         try:
             headers = Headers(scope=scope)
             check_key(headers.get("x-api-key", ""))
+            if probe:
+                await self.app(scope, receive, send)
+                return
             size = headers.get("content-length")
             if size is not None and (not size.isdecimal() or int(size) > MAX_REQUEST):
                 raise HTTPException(413, "Maximum input size is 20 MB.")

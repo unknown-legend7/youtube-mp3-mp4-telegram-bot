@@ -6,11 +6,13 @@ import sys
 import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 
 from document_native import OFFICE_TYPES, native_features
+from native_relay import LOCAL_ONLY_HEADER, configured_worker, forward_native_document, remote_features
+from pdf_tools import JobError
 
 router = APIRouter()
 MAX_SIZE = 20_000_000
@@ -54,7 +56,17 @@ async def process_document(directory, job):
 
 @router.get("/document-capabilities")
 async def capabilities():
-    return {"pdf": sorted(PDF_ACTIONS - {"pdfa"}), "html": True, **await asyncio.to_thread(native_features)}
+    status = await asyncio.to_thread(native_features)
+    worker = configured_worker() if not (status["office"] and status["pdfa"]) else None
+    if worker:
+        remote = await remote_features(worker)
+        status = {**remote, "office": status["office"] or remote["office"],
+                  "pdfa": status["pdfa"] or remote["pdfa"]}
+    return {"pdf": sorted(PDF_ACTIONS - {"pdfa"}), "html": True, **status}
+
+@router.get("/native-worker-capabilities")
+async def native_worker_capabilities():
+    return await asyncio.to_thread(native_features)
 
 
 @router.post("/convert-document")
@@ -63,11 +75,15 @@ async def convert_document(
     action: str = Form(...),
     options: str = Form("{}"),
     password: str | None = Form(None),
+    local_only: str = Header(default='', alias=LOCAL_ONLY_HEADER),
 ):
     if action not in {*PDF_ACTIONS, "html", "office"}:
         raise HTTPException(400, "Choose a supported document operation.")
+    worker = None
     if action in {"office", "pdfa"} and not (await asyncio.to_thread(native_features))[action]:
-        raise HTTPException(503, "This tool needs a configured isolated document worker.")
+        worker = None if local_only == "1" else configured_worker()
+        if not worker:
+            raise HTTPException(503, "This tool needs a configured isolated document worker.")
     if (action == "merge" and not 2 <= len(file) <= 6) or (action != "merge" and len(file) != 1):
         raise HTTPException(400, "Merge requires 2 to 6 PDFs. Other operations accept one file.")
     if password is not None and (action != "unlock" or len(password.encode()) > 512):
@@ -100,9 +116,12 @@ async def convert_document(
                     if size > MAX_SIZE:
                         raise HTTPException(413, "Maximum combined input size is 20 MB.")
                     stream.write(chunk)
-        result = await process_document(temp.name, {
-            "inputs": inputs, "action": action, "settings": settings, "password": password,
-        })
+        if worker:
+            result = await forward_native_document(worker, inputs[0], action)
+        else:
+            result = await process_document(temp.name, {
+                "inputs": inputs, "action": action, "settings": settings, "password": password,
+            })
         if "error" in result:
             raise HTTPException(result.get("status", 422), result["error"])
         if "info" in result:
@@ -122,6 +141,8 @@ async def convert_document(
                                 background=BackgroundTask(temp.cleanup))
         response_ready = True
         return response
+    except JobError as exc:
+        raise HTTPException(exc.status, str(exc)) from None
     except TimeoutError:
         raise HTTPException(504, "Document conversion timed out. Try a smaller file or fewer pages.") from None
     finally:
