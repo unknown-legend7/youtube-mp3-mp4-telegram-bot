@@ -12,6 +12,7 @@ from starlette.background import BackgroundTask
 
 from document_native import OFFICE_TYPES, native_features
 from native_relay import LOCAL_ONLY_HEADER, configured_worker, forward_native_document, remote_features
+from office_basic import BASIC_OFFICE_EXTENSIONS
 from pdf_tools import JobError
 
 router = APIRouter()
@@ -62,7 +63,7 @@ async def capabilities():
         remote = await remote_features(worker)
         status = {**remote, "office": status["office"] or remote["office"],
                   "pdfa": status["pdfa"] or remote["pdfa"]}
-    return {"pdf": sorted(PDF_ACTIONS - {"pdfa"}), "html": True, **status}
+    return {"pdf": sorted(PDF_ACTIONS - {"pdfa"}), "html": True, "office_basic": True, **status}
 
 @router.get("/native-worker-capabilities")
 async def native_worker_capabilities():
@@ -77,7 +78,7 @@ async def convert_document(
     password: str | None = Form(None),
     local_only: str = Header(default='', alias=LOCAL_ONLY_HEADER),
 ):
-    if action not in {*PDF_ACTIONS, "html", "office"}:
+    if action not in {*PDF_ACTIONS, "html", "office", "office-basic"}:
         raise HTTPException(400, "Choose a supported document operation.")
     worker = None
     if action in {"office", "pdfa"} and not (await asyncio.to_thread(native_features))[action]:
@@ -103,7 +104,11 @@ async def convert_document(
     try:
         inputs = []
         size = 0
-        extensions = set(OFFICE_TYPES) if action == "office" else {"html", "htm"} if action == "html" else {"pdf"}
+        extensions = {
+            "office": set(OFFICE_TYPES),
+            "office-basic": BASIC_OFFICE_EXTENSIONS,
+            "html": {"html", "htm"},
+        }.get(action, {"pdf"})
         for index, item in enumerate(file):
             extension = Path(item.filename or "").suffix.lstrip(".").lower()
             if extension not in extensions:

@@ -10,7 +10,7 @@ import subprocess
 
 from docx import Document
 from httpx import ASGITransport, AsyncClient, ByteStream, MockTransport, Response
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 from PIL import Image
 from pptx import Presentation
 from pypdf import PdfReader, PdfWriter
@@ -159,6 +159,53 @@ class DocumentTests(DocumentAPI):
         external = await self.convert("html", [("source.html", b'<img src="https://example.invalid/image.png">')])
         self.assertEqual(external.status_code, 422)
         self.assertIn("external resources", external.text)
+
+    async def test_basic_word_pdf_preserves_text_and_table_order(self):
+        word = Document()
+        word.add_heading("Project notes", level=1)
+        word.add_table(rows=1, cols=1).cell(0, 0).text = "<script>literal</script>"
+        word.add_paragraph("Review complete")
+        fixture = io.BytesIO()
+        word.save(fixture)
+        with patch.object(document_routes, "native_features", return_value={"office": False, "pdfa": False}):
+            caps = (await self.client.get("/document-capabilities")).json()
+            self.assertTrue(caps["office_basic"])
+            self.assertFalse(caps["office"])
+            response = await self.convert("office-basic", [("source.docx", fixture.getvalue())])
+        output = " ".join(self.read_pdf(response).pages[0].extract_text().split())
+        self.assertEqual(output, "Project notes <script>literal</script> Review complete")
+        self.assertIn("Word text and tables", response.headers["x-conversion-note"])
+
+    async def test_basic_excel_pdf_uses_saved_values_and_visible_sheets(self):
+        workbook = Workbook()
+        workbook.active.title = "Visible figures"
+        workbook.active.append(["Revenue", 175, "=6*7", "=2+3"])
+        workbook.create_sheet("Hidden sheet").sheet_state = "hidden"
+        workbook["Hidden sheet"]["A1"] = "Hidden content"
+        fixture = io.BytesIO()
+        workbook.save(fixture)
+        cached = io.BytesIO()
+        with ZipFile(fixture) as original, ZipFile(cached, "w") as edited:
+            for name in original.namelist():
+                data = original.read(name)
+                if name == "xl/worksheets/sheet1.xml":
+                    data = data.replace(b"<f>6*7</f><v></v>", b"<f>6*7</f><v>42</v>")
+                edited.writestr(name, data)
+        response = await self.convert("office-basic", [("source.xlsx", cached.getvalue())])
+        output = " ".join(self.read_pdf(response).pages[0].extract_text().split())
+        self.assertEqual(output, "Visible figures Revenue 175 42")
+        self.assertIn("saved cell values", response.headers["x-conversion-note"])
+
+    async def test_basic_office_rejects_unsupported_format_and_wide_sheets(self):
+        unsupported = await self.convert("office-basic", [("source.pptx", b"fixture")])
+        self.assertEqual(unsupported.status_code, 415)
+        workbook = Workbook()
+        workbook.active["M1"] = "Beyond the width limit"
+        fixture = io.BytesIO()
+        workbook.save(fixture)
+        wide = await self.convert("office-basic", [("source.xlsx", fixture.getvalue())])
+        self.assertEqual(wide.status_code, 422)
+        self.assertIn("12 columns", wide.text)
 
     async def test_auth_invalid_input_native_feature_gates_and_timeout(self):
         self.assertEqual((await self.convert("inspect", key="wrong")).status_code, 401)

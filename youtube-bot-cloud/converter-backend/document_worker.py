@@ -6,6 +6,7 @@ from zipfile import BadZipFile
 from pypdf.errors import PdfReadError
 
 from document_native import html_to_pdf, office_to_pdf, pdf_to_pdfa
+from office_basic import office_to_basic_pdf
 from pdf_office import pdf_to_office
 from pdf_tools import JobError, pdf_operation
 
@@ -28,6 +29,8 @@ def main():
         if action == "html":
             html_to_pdf(inputs[0], directory / "converted.pdf")
             result = {"file": "converted.pdf", "note": "Rendered with scripts and external resources disabled."}
+        elif action == "office-basic":
+            result = office_to_basic_pdf(inputs[0], directory)
         elif action == "office":
             result = office_to_pdf(inputs[0], directory)
         elif action == "pdfa":
