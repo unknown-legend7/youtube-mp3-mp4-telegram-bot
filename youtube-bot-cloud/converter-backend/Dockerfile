@@ -25,7 +25,7 @@ RUN set -eu; \
     fi; \
     rm /tmp/verapdf-install.xml
 
-COPY main.py image_routes.py image_worker.py document_routes.py document_worker.py document_native.py pdf_tools.py pdf_office.py native_relay.py office_basic.py ./
+COPY main.py image_routes.py image_worker.py document_routes.py document_worker.py document_native.py pdf_tools.py pdf_office.py native_relay.py office_basic.py multipart_files.py ./
 
 EXPOSE 8000
 

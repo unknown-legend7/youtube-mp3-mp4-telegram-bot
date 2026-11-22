@@ -6,11 +6,12 @@ import sys
 import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, File, Form, Header, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 
 from document_native import OFFICE_TYPES, native_features
+from multipart_files import ordered_uploads
 from native_relay import LOCAL_ONLY_HEADER, configured_worker, forward_native_document, remote_features
 from office_basic import BASIC_OFFICE_EXTENSIONS
 from pdf_tools import JobError
@@ -72,6 +73,7 @@ async def native_worker_capabilities():
 
 @router.post("/convert-document")
 async def convert_document(
+    request: Request,
     file: list[UploadFile] = File(...),
     action: str = Form(...),
     options: str = Form("{}"),
@@ -85,6 +87,7 @@ async def convert_document(
         worker = None if local_only == "1" else configured_worker()
         if not worker:
             raise HTTPException(503, "This tool needs a configured isolated document worker.")
+    file = ordered_uploads(file, await request.form(), 6 if action == "merge" else 1)
     if (action == "merge" and not 2 <= len(file) <= 6) or (action != "merge" and len(file) != 1):
         raise HTTPException(400, "Merge requires 2 to 6 PDFs. Other operations accept one file.")
     if password is not None and (action != "unlock" or len(password.encode()) > 512):

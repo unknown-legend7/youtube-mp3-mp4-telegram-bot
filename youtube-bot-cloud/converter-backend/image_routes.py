@@ -5,11 +5,12 @@ import sys
 import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 
 from image_worker import FORMATS, MAX_BATCH, MAX_BYTES, OUTPUTS
+from multipart_files import ordered_uploads
 
 router = APIRouter()
 MIMES = {"jpg": "image/jpeg", "png": "image/png", "webp": "image/webp", "pdf": "application/pdf"}
@@ -43,11 +44,13 @@ async def process_image(manifest, workdir):
 
 @router.post("/convert-image")
 async def convert_image(
+    request: Request,
     file: list[UploadFile] = File(...),
     output_format: str = Form(...),
     options: str = Form("{}"),
 ):
     ext = "jpg" if output_format.lower() == "jpeg" else output_format.lower()
+    file = ordered_uploads(file, await request.form(), MAX_BATCH if ext == "pdf" else 1)
     if ext not in OUTPUTS or not 1 <= len(file) <= (MAX_BATCH if ext == "pdf" else 1):
         raise HTTPException(400, "Choose an image output or send one to six images for PDF.")
     try:

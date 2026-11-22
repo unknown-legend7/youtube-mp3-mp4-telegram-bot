@@ -101,6 +101,17 @@ class DocumentTests(DocumentAPI):
         for op, pages in [("split", "all"), ("delete", "all"), ("extract", "4")]:
             self.assertEqual((await self.convert(op, options={"pages": pages})).status_code, 422)
 
+    async def test_telegram_numbered_pdf_merge_preserves_order(self):
+        one = ("one.pdf", sample_pdf(pages=1), "application/pdf")
+        two = ("two.pdf", sample_pdf(pages=2), "application/pdf")
+        response = await self.client.post(
+            "/convert-document", headers={"x-api-key": "test-key"},
+            files=[("file_2", two), ("file", one)], data={"action": "merge"},
+        )
+        pages = self.read_pdf(response).pages
+        self.assertEqual([page.extract_text().strip() for page in pages],
+                         ["Synthetic page 1", "Synthetic page 1", "Synthetic page 2"])
+
     async def test_compression_preserves_text(self):
         source = io.BytesIO()
         document = canvas.Canvas(source, pageCompression=0)
@@ -261,22 +272,56 @@ class DocumentTests(DocumentAPI):
 
     @unittest.skipUnless(os.getenv("RUN_NATIVE_DOCUMENT_TESTS") == "1", "requires a native sandbox host")
     async def test_native_office_to_pdf(self):
-        from openpyxl import Workbook
         from pptx.util import Inches
 
         self.assertTrue((await self.client.get("/document-capabilities")).json()["office"])
         word = Document()
         word.add_paragraph("Synthetic Word document")
+        word.add_table(rows=1, cols=2).rows[0].cells[1].text = "Word table value"
+        word.add_page_break()
+        word.add_paragraph("Second Word page")
+
         excel = Workbook()
         excel.active["A1"] = "Synthetic Excel worksheet"
+        excel.active["B2"] = "=6*7"
+        excel.active["A20"] = "Outside the print area"
+        excel.active.print_area = "A1:B2"
+        excel.active.page_setup.orientation = "landscape"
+
         powerpoint = Presentation()
-        slide = powerpoint.slides.add_slide(powerpoint.slide_layouts[6])
-        slide.shapes.add_textbox(Inches(1), Inches(1), Inches(8), Inches(1)).text = "Synthetic PowerPoint slide"
+        powerpoint.slide_width = Inches(12)
+        powerpoint.slide_height = Inches(6.75)
+        for number in (1, 2):
+            slide = powerpoint.slides.add_slide(powerpoint.slide_layouts[6])
+            textbox = slide.shapes.add_textbox(Inches(1), Inches(1), Inches(8), Inches(1))
+            textbox.text = f"Synthetic PowerPoint slide {number}"
+
+        outputs = {}
         for suffix, fixture in (("docx", word), ("xlsx", excel), ("pptx", powerpoint)):
             stream = io.BytesIO()
             fixture.save(stream)
             result = await self.convert("office", [("source." + suffix, stream.getvalue())])
-            self.assertIn("Synthetic", self.read_pdf(result).pages[0].extract_text())
+            outputs[suffix] = self.read_pdf(result)
+
+        word_pages = outputs["docx"].pages
+        self.assertEqual(len(word_pages), 2)
+        self.assertIn("Word table value", word_pages[0].extract_text())
+        self.assertIn("Second Word page", word_pages[1].extract_text())
+
+        excel_pages = outputs["xlsx"].pages
+        self.assertEqual(len(excel_pages), 1)
+        excel_page = excel_pages[0]
+        self.assertGreater(excel_page.mediabox.width, excel_page.mediabox.height)
+        excel_text = excel_page.extract_text()
+        self.assertIn("Synthetic Excel worksheet", excel_text)
+        self.assertIn("42", excel_text)
+        self.assertNotIn("Outside the print area", excel_text)
+
+        slides = outputs["pptx"].pages
+        self.assertEqual(len(slides), 2)
+        for number, page in enumerate(slides, 1):
+            self.assertIn(f"Synthetic PowerPoint slide {number}", page.extract_text())
+            self.assertAlmostEqual(float(page.mediabox.width / page.mediabox.height), 16 / 9, places=2)
 
     @unittest.skipUnless(os.getenv("RUN_PDFA_TESTS") == "1", "requires Ghostscript and veraPDF in the sandbox")
     async def test_native_archive_pdfa(self):

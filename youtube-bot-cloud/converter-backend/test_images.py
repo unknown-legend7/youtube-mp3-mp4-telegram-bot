@@ -114,6 +114,32 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
             first = PdfReader(io.BytesIO(result.content)).pages[0]
             self.assertEqual((float(first.mediabox.width), float(first.mediabox.height)), size)
 
+    async def test_telegram_batch_fields_are_ordered_and_bounded(self):
+        blue = ("blue.png", fixture(color="blue"), "image/png")
+        red = ("red.png", fixture(color="red"), "image/png")
+        yellow = ("yellow.png", fixture(color="yellow"), "image/png")
+        async def request(files, output):
+            return await self.client.post(
+                "/convert-image", headers={"x-api-key": "test-key"},
+                files=files, data={"output_format": output},
+            )
+        result = await request([("file_3", yellow), ("file", blue), ("file_2", red)], "pdf")
+        self.assertEqual(result.status_code, 200)
+        reader = PdfReader(io.BytesIO(result.content))
+        self.assertEqual(len(reader.pages), 3)
+        for page, color in zip(reader.pages, ((0, 0, 255), (255, 0, 0), (255, 255, 0))):
+            pixel = next(iter(page.images)).image.convert("RGB").getpixel((5, 5))
+            for actual, expected in zip(pixel, color):
+                self.assertAlmostEqual(actual, expected, delta=5)
+        for files, output in [
+            ([("file", blue), ("file_3", yellow)], "pdf"),
+            ([("file", blue), ("file_2", red), ("file_2", yellow)], "pdf"),
+            ([("file", blue), ("file", red), ("file_2", yellow)], "pdf"),
+            ([("file", blue), ("file_2", red)], "png"),
+        ]:
+            with self.subTest(output=output, fields=[name for name, _ in files]):
+                self.assertEqual((await request(files, output)).status_code, 400)
+
     async def test_invalid_image_animation_auth_and_limits(self):
         png = fixture()
         with io.BytesIO() as stream:
